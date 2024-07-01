@@ -1,0 +1,192 @@
+<?php
+include($_SERVER['DOCUMENT_ROOT'].'/bitrix/modules/main/include/prolog_before.php');
+
+use Bitrix\Main\Localization\Loc;
+use PhpOffice\PhpSpreadsheet\IOFactory;
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
+
+Loc::loadLanguageFile(__FILE__);
+
+$request = \Bitrix\Main\Application::getInstance()->getContext()->getRequest();
+$voteID = $request->get('ID');
+$voteData = \::getRow(
+    [
+        'filter' => ['ID' => $voteID],
+        'select' => ['*'],
+    ]
+);
+$voters = \::getList(
+    [
+        'filter' => ['VOTE_ID' => $voteID],
+        'select' => [
+            'USER_ID',
+            'NAME'        => 'USER_DATA.NAME',
+            'SECOND_NAME' => 'USER_DATA.SECOND_NAME',
+            'LAST_NAME'   => 'USER_DATA.LAST_NAME',
+            'EMAIL'       => 'USER_DATA.EMAIL',
+            'PHONE' => 'USER_DATA.PHONE',
+            'IS_MEMBER',
+            'VOTE_WEIGHT',
+            'VOTE',
+            'RESULT'      => 'VOTE_DATA.RESULT',
+        ],
+        'order'  => ['VOTE' => 'DESC'],
+        'group'  => ['USER_ID'],
+    ]
+);
+$arUsersVotes = [];
+$arUsersVotesResult = [];
+while ($user = $voters->fetch()) {
+    $arDataSectors = \::getList([
+        'filter' => [
+            'UF_USER_ID'           => $user['USER_ID'], // что бы не забирать вообще все участки
+            '!=SECTOR_DATA.DELETE' => 1,
+        ],
+        'select' => [
+            'USER_ID'       => 'UF_USER_ID',
+            'SECTOR_ID'     => 'UF_SECTOR_ID',
+            'SECTOR_NUMBER' => 'SECTOR_DATA.SECTOR_NUMBER',
+            'SECTOR_STREET' => 'SECTOR_DATA.SECTOR_STREET',
+        ],
+        'group'  => ['SECTOR_DATA.ID'],
+    ]);
+    $userSector = '';
+    while ($sector = $arDataSectors->fetch()) {
+        $title = $sector['SECTOR_NUMBER'];
+        if (!empty($sector['SECTOR_STREET'])) {
+            $title .= ', '.$sector['SECTOR_STREET'];
+        }
+        $userSector = ($userSector) ? $userSector.'; '.$title : $title;
+    }
+
+    $arUsersVotes[] = [
+        'data'        => [
+            $userSector,
+            $user['LAST_NAME'],
+            $user['NAME'],
+            $user['SECOND_NAME'],
+            $user['EMAIL'],
+            $user['PHONE'],
+            ($user['IS_MEMBER']) ? 'Да' : 'Нет',
+        ],
+        'result'      => $user['RESULT'],
+        'vote_weight' => $user['VOTE_WEIGHT'],
+    ];
+}
+
+header("Content-type:  application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+header('Content-disposition: attachment; filename=vote_report.xlsx');
+
+$xlsx = new Spreadsheet();
+$sheet = $xlsx->getActiveSheet();
+
+$i = $j = $k = 8;
+$answers_string = [
+    Loc::getMessage('SECTOR'),
+    Loc::getMessage('LAST_NAME'),
+    Loc::getMessage('FIRST_NAME'),
+    Loc::getMessage('SURNAME'),
+    Loc::getMessage('EMAIL'),
+    Loc::getMessage('PHONE'),
+    Loc::getMessage('MEMBER'),
+];
+
+$answerAr = [];
+
+$sheet->fromArray($answers_string, null, 'A3');
+foreach ($voteData['STEP8']['MAINVOTEAGENDA_ITEMS'] as $key => $item) {
+    $cell = $sheet->setCellValueByColumnAndRow($i, '1', $item['items']);
+    if (!empty($item['AGENDA_SUB_ITEM'])) {
+        foreach ($item['AGENDA_SUB_ITEM'] as $num => $value) {
+            $sheet->setCellValueByColumnAndRow($j, '2', $value['SubItem']);
+            foreach ($value['ANSWERS'] as $test => $answer) {
+                $sheet->setCellValueByColumnAndRow($k, '3', $answer);
+                $answerAr[] = [
+                    'POSITION' => [
+                        $key => [
+                            $num =>
+                                [
+                                    $test =>
+                                        [
+                                            'COLUMN' => $k,
+                                        ],
+                                ],
+                        ],
+                    ],
+                ];
+                $k++;
+                $j++;
+            }
+        }
+    } else {
+        foreach ($item['ANSWERS'] as $test => $answer) {
+            $sheet->setCellValueByColumnAndRow($k, '3', $answer);
+            $answerAr[] = [
+
+                'POSITION' => [
+                    $key => [$test => ['COLUMN' => $k,]],
+                ],
+            ];
+            $k++;
+        }
+    }
+    $try = $k - 1;
+    $cell->mergeCellsByColumnAndRow($i, '1', $try, '1');
+    $i = $j = $k;
+}
+$row = 4;
+$total = [];
+foreach ($arUsersVotes as $item) {
+    $sheet->fromArray($item['data'], null, 'A'.$row);
+    foreach ($item['result'] as $key => $value) {
+        if (is_array($value)) {
+            foreach ($value as $num => $answer) {
+                foreach ($answer as $test => $subItem) {
+                    foreach ($answerAr as $a) {
+                        if (!empty($a['POSITION'][$key][$num][$subItem]['COLUMN'])) {
+                            $sheet->setCellValueByColumnAndRow(
+                                $a['POSITION'][$key][$num][$subItem]['COLUMN'],
+                                $row,
+                                $item['vote_weight']
+                            );
+
+                            $total[$a['POSITION'][$key][$num][$subItem]['COLUMN']] += $item['vote_weight'];
+                        }
+                    }
+                }
+            }
+        } else {
+            foreach ($answerAr as $a) {
+                if (!empty($a['POSITION'][$key][$value]['COLUMN'])) {
+                    $sheet->setCellValueByColumnAndRow(
+                        $a['POSITION'][$key][$value]['COLUMN'],
+                        $row,
+                        $item['vote_weight']
+                    );
+                    $total[$a['POSITION'][$key][$value]['COLUMN']] += $item['vote_weight'];
+                }
+            }
+        }
+    }
+    $row++;
+}
+$sheet->setCellValueByColumnAndRow(
+    1,
+    $row,
+    'ИТОГО (с учётом веса голоса)'
+);
+foreach ($total as $key => $item) {
+    $sheet->setCellValueByColumnAndRow(
+        $key,
+        $row,
+        $item
+    );
+}
+
+$arFile = \CFile::MakeFileArray('vote_report.xlsx');
+$fid = \CFile::SaveFile($arFile, 'downloadfiles');
+$path = \CFile::GetPath($fid);
+
+header('Location:'.\Helper::getFilePath($path));
+
+die();
